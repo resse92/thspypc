@@ -465,7 +465,11 @@ class AuctionService:
         if profile.kind in (AccountKind.STANDARD, AccountKind.UNKNOWN):
             capability = Capability.BASIC_AUCTION
             role = ConnectionRole.MAIN
-            historical = _is_historical_date(trade_date)
+            # MAIN's live 9354/7176 request may remain silent after 09:25.
+            # Replay today's completed auction via 9355/6144 as well as past days.
+            historical = (
+                _is_historical_date(trade_date) or not _in_auction_session()
+            )
             frame = (
                 build_index_auction_context_query(code, market=market)
                 if index_auction
@@ -552,6 +556,7 @@ class AuctionService:
                 if (
                     not response.startswith(b"\x0a")
                     and b"hd1.0" not in response
+                    and b"hd3.1" not in response
                     and b'{"Auction"' not in response
                     and b'{"CloseAuction"' not in response
                 ):

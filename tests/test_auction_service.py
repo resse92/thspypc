@@ -56,6 +56,9 @@ class FakeSocket:
 
 
 def test_standard_account_uses_main_protocol(monkeypatch):
+    monkeypatch.setattr(
+        "thspypc.services.auction._in_auction_session", lambda now=None: True,
+    )
     opened = []
     manager = ConnectionManager(
         STANDARD_PROFILE,
@@ -78,6 +81,46 @@ def test_standard_account_uses_main_protocol(monkeypatch):
     assert b"pageid=9354" in manager.peek(
         ConnectionRole.MAIN
     ).socket.sent[0]
+
+
+@pytest.mark.parametrize("kind", [AccountKind.STANDARD, AccountKind.UNKNOWN])
+@pytest.mark.parametrize("explicit_today", [False, True])
+def test_main_opening_auction_outside_session_replays_today(
+    monkeypatch, kind, explicit_today,
+):
+    opened = []
+    sock = FakeSocket()
+    profile = AccountProfile(
+        kind=kind,
+        capabilities={Capability.BASIC_AUCTION: Support.YES},
+    )
+    manager = ConnectionManager(
+        profile, lambda spec: opened.append(spec.role) or sock,
+    )
+    monkeypatch.setattr(
+        "thspypc.services.auction._in_auction_session", lambda now=None: False,
+    )
+    expected = [{"dt10": 12.34}]
+    monkeypatch.setattr(
+        "thspypc.services.auction.parse_auction_response", lambda _body: expected,
+    )
+    def read_once(_sock):
+        if getattr(read_once, "received", False):
+            raise TimeoutError("valid hd3.1 auction response was discarded")
+        read_once.received = True
+        return b"\x09\x00\x16\xffhd3.1\x00auction"
+
+    service = AuctionService(manager, frame_reader=read_once)
+
+    assert service.auction(
+        "000001", market=33,
+        trade_date=date.today().isoformat() if explicit_today else None,
+    ) == expected
+    assert opened == [ConnectionRole.MAIN]
+    assert b"pageid=9355" in sock.sent[0]
+    assert b"DateTime=6144(" in sock.sent[0]
+    assert b"pageid=9354" not in sock.sent[0]
+    assert b"DateTime=7176(" not in sock.sent[0]
 
 
 def test_index_auction_uses_t_url_and_parses_live_json():

@@ -1075,6 +1075,9 @@ def test_unknown_account_auction_reuses_main_without_l2_probe(
     main = FakeSocket()
     client._sock = main
     client._account_evidence.record_main_ready({"userclass": "unrecognized"})
+    monkeypatch.setattr(
+        "thspypc.services.auction._in_auction_session", lambda now=None: True,
+    )
     assert client.observed_account_profile.kind is AccountKind.UNKNOWN
 
     def reject_open(_spec):
