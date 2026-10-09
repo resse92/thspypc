@@ -345,14 +345,8 @@ export function StockProvider({
         setIntradayLoading(false)
       }
       try {
-        // 先完成该股票的 4214 注册，再读取分时；与盘口、逐笔及实时流
-        // 共享前端 single-flight，切股时不会同时争抢注册响应。
-        await retryCurrentRequest(
-          () => api.stockReady(target),
-          isCurrent,
-          showRecoverableError,
-        )
-        if (!isCurrent()) return
+        // 分时直接请求，由后端协调注册及普通分时降级；L2 推送注册失败
+        // 不应阻断基础行情。切股保护和分时自身的重试仍保持独立。
         const rows = await retryCurrentRequest(
           () => api.intraday(target),
           isCurrent,
@@ -398,8 +392,7 @@ export function StockProvider({
       intradayLane(async () => {
         if (!active || target !== codeRef.current) return
         try {
-          await api.stockReady(target)
-          if (!active || target !== codeRef.current) return
+          // 竞价轮询同样不依赖 L2 推送注册，允许后端独立处理与降级。
           const rows = await api.intraday(target)
           if (active && target === codeRef.current) {
             setIntraday({ code: target, rows })
@@ -478,7 +471,7 @@ export function StockProvider({
     }
   }, [code, intradayLane])
 
-  // K-line starts immediately on the selected market's L2 connection.
+  // K-line uses the independent basic-quote KLINE_FAST connection, not L2.
   // Period/fuquan changes only rerun this lane.  Cached rows remain visible
   // while the lane refreshes them in the background.
   useEffect(() => {
@@ -507,9 +500,9 @@ export function StockProvider({
         // KLINE_FAST 也在预热范围内；等它就绪再发，避免与预热争建连。
         await api.preheatReady()
         if (!isCurrent()) return
-        // Web 看盘固定复用 Level2 市场连接：沪/北走 SH_L2、深走 SZ_L2，
-        // pageid=1334。不要使用 ifindhq_fast；它是独立 BASIC/MAIN 连接。
-        const channel = 'level2'
+        // K 线属于基础行情，固定走独立 KLINE_FAST 通道；auto 对 Level2
+        // 账号仍会选 L2，不能隔离 L2 建连失败。
+        const channel = 'ifindhq_fast'
         const rows = await retryCurrentRequest(
           () =>
             api.kline(
@@ -547,7 +540,7 @@ export function StockProvider({
       }
     }
     // 切股时先让轻量盘口和上方分时抢到首屏；快速连续滚动只为最终停留
-    // 股票发 K 线，避免每个中间代码都占一次 L2 lane。
+    // 股票发 K 线，避免每个中间代码都占一次 K 线请求车道。
     const timer = setTimeout(() => {
       klineLane(load)
     }, KLINE_SWITCH_COALESCE_MS)
