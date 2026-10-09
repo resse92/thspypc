@@ -983,7 +983,8 @@ class ServiceFacade:
         """查集合竞价（9:15-9:25 的撮合价、领先价、累计量及未匹配量）。
 
         普通账号走 MAIN：当天请求用 ``pageid=9354/period=7176``，历史交易日
-        用 ``pageid=9355/period=6144``。Level2 账号：竞价时段(9:15-9:25)走
+        用 ``pageid=9355/period=6144``；账号类型未知时也优先走基础 MAIN 路径。
+        Level2 账号：竞价时段(9:15-9:25)走
         ``pageid=1334/period=7176`` 实时路径拿实时撮合；**非竞价时段走 L2
         历史路径 pageid=4417** 拿当日完整竞价序列(~39ms)，避免实时路径在非竞价
         时段死等 timeout(盘后偶发 12s+)。沪深指数改走 ``pageid=6240`` 的
@@ -1027,9 +1028,9 @@ class ServiceFacade:
             else self.observed_account_profile
         )
         capability = (
-            Capability.BASIC_AUCTION
-            if profile.kind is AccountKind.STANDARD
-            else Capability.L2_AUCTION
+            Capability.L2_AUCTION
+            if profile.kind is AccountKind.LEVEL2
+            else Capability.BASIC_AUCTION
         )
         return self._run_default_service(
             (capability,),
@@ -1335,7 +1336,7 @@ class ServiceFacade:
     ) -> list[dict]:
         """查 14:57-15:00 尾盘集合竞价逐点行情。
 
-        普通账号走 MAIN：当天 ``pageid=9354``，历史日 ``pageid=9355``。
+        普通及未知类型账号走 MAIN：当天 ``pageid=9354``，历史日 ``pageid=9355``。
         Level2 账号走对应市场连接：当天 ``pageid=4214``，历史日
         ``pageid=4417``。两类账号都使用 ``period=7424``，但连接、页号和
         请求头不混用。
@@ -1351,9 +1352,9 @@ class ServiceFacade:
             else self.observed_account_profile
         )
         capability = (
-            Capability.BASIC_AUCTION
-            if profile.kind is AccountKind.STANDARD
-            else Capability.L2_AUCTION
+            Capability.L2_AUCTION
+            if profile.kind is AccountKind.LEVEL2
+            else Capability.BASIC_AUCTION
         )
         return self._run_default_service(
             (capability,),

@@ -460,7 +460,9 @@ class AuctionService:
         index_auction = market in (16, 32)
         if index_auction and _is_historical_date(trade_date):
             raise ValueError("指数 T_URL 竞价接口只提供当前交易日")
-        if profile.kind is AccountKind.STANDARD:
+        # Unknown entitlement must not force an L2 probe for a basic feature.
+        # Capability checks below still reject unverified explicit contexts.
+        if profile.kind in (AccountKind.STANDARD, AccountKind.UNKNOWN):
             capability = Capability.BASIC_AUCTION
             role = ConnectionRole.MAIN
             historical = _is_historical_date(trade_date)
@@ -588,7 +590,7 @@ class AuctionService:
         index_auction = market in (16, 32)
         if index_auction and _is_historical_date(trade_date):
             raise ValueError("指数 T_URL 竞价接口只提供当前交易日")
-        if profile.kind is AccountKind.STANDARD:
+        if profile.kind in (AccountKind.STANDARD, AccountKind.UNKNOWN):
             capability = Capability.BASIC_AUCTION
             role = ConnectionRole.MAIN
             frame = (

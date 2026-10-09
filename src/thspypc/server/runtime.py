@@ -131,7 +131,10 @@ class ThsRuntime:
             ),
             "server": getattr(client, "_connected_ip", None),
             "account_kind": kind,
-            "credentials": bool(self._env.get("THS_USERNAME")),
+            "credentials": bool(
+                (self._env.get("THS_USERNAME") or os.environ.get("THS_USERNAME"))
+                and (self._env.get("THS_PASSWORD") or os.environ.get("THS_PASSWORD"))
+            ),
             "preheat": preheat,
             "heartbeat": (
                 heartbeat_status()

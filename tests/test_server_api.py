@@ -315,6 +315,16 @@ def test_status_and_connect(client_and_app):
     assert fake.calls[0] == ("connect",)
 
 
+@pytest.mark.parametrize("password", ["offline-password", ""])
+def test_status_credentials_reads_container_environment(tmp_path, monkeypatch, password):
+    monkeypatch.setenv("THS_USERNAME", "offline-user")
+    monkeypatch.setenv("THS_PASSWORD", password)
+    runtime = ThsRuntime(env_path=tmp_path / "missing.env")
+    client = TestClient(create_app(runtime))
+
+    assert client.get("/api/status").json()["credentials"] is bool(password)
+
+
 def test_quote_splits_markets(client_and_app):
     fake, client = client_and_app
     resp = client.get("/api/quote", params={"codes": "600519,000938"}).json()

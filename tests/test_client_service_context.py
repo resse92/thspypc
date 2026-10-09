@@ -1063,6 +1063,42 @@ def test_market_snapshot_opt_in_delegates_without_l2(monkeypatch):
     assert manager.peek(ConnectionRole.SZ_L2) is None
 
 
+@pytest.mark.parametrize("method", ["auction", "closing_auction"])
+@pytest.mark.parametrize(
+    "trade_date,pageid",
+    [(None, b"pageid=9354"), ("2026-07-24", b"pageid=9355")],
+)
+def test_unknown_account_auction_reuses_main_without_l2_probe(
+    monkeypatch, method, trade_date, pageid,
+):
+    client = _client()
+    main = FakeSocket()
+    client._sock = main
+    client._account_evidence.record_main_ready({"userclass": "unrecognized"})
+    assert client.observed_account_profile.kind is AccountKind.UNKNOWN
+
+    def reject_open(_spec):
+        pytest.fail("auction must reuse MAIN, not open another channel")
+
+    monkeypatch.setattr(client, "_open_service_connection", reject_open)
+    manager = client._ensure_default_service_context()
+    client._auction_service._read_frame = lambda _sock: b"hd1.0\x00auction"
+    client._auction_service._max_frames = 1
+    expected = [{"dt10": 12.34}]
+    for parser in ("parse_auction_response", "parse_closing_auction_response"):
+        monkeypatch.setattr(
+            f"thspypc.services.auction.{parser}", lambda _body: expected,
+        )
+
+    assert getattr(client, method)("000001", trade_date=trade_date) == expected
+    assert len(main.sent) == 1
+    assert pageid in main.sent[0]
+    assert manager.peek(ConnectionRole.MAIN).socket is main
+    assert manager.peek(ConnectionRole.SZ_L2) is None
+    assert client.observed_account_profile.kind is AccountKind.UNKNOWN
+    assert manager.profile.kind is AccountKind.UNKNOWN
+
+
 def test_auction_opt_in_delegates_with_inferred_market(monkeypatch):
     client = _client()
     client._push_socks["sh"] = FakeSocket()
