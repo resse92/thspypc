@@ -9,6 +9,12 @@ compile_args = ["/O2"] if os.name == "nt" else ["-O3"]
 setup(
     packages=find_packages("src"),
     package_dir={"": "src"},
+    package_data={
+        "thspypc.features": [
+            "stock_name_bootstrap_data.json",
+            "stock_name_groups_data.json",
+        ],
+    },
     ext_modules=[
         Extension(
             "thspypc.codecs._compression_native",

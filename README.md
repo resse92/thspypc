@@ -796,6 +796,54 @@ dev.bat   # Windows cmd
 - 从 `cloud.10jqka.com.cn` 下载系统板块 ZIP 到 `~/.thspypc/blockupdate`
   （之后每日在后台检查更新）。
 
+### Docker 运行后端
+
+在仓库根目录构建并启动 FastAPI 后端（不包含 React 前端）。
+镜像构建和运行均使用 Python 3.14，与 `.python-version` 和开发启动脚本一致：
+
+```bash
+docker build -t thspypc-backend .
+# 先复制 .env.example 为 .env，填写 THS_USERNAME / THS_PASSWORD
+docker run -d --name thspypc-backend \
+  --env-file .env \
+  --mount source=thspypc-cache,target=/home/app \
+  -p 127.0.0.1:8765:8765 \
+  thspypc-backend
+```
+
+接口文档：<http://localhost:8765/docs>。使用
+`docker logs -f thspypc-backend` 查看日志。
+`.env` 不会打包进镜像，凭据通过运行时环境变量传入。
+容器以非 root 用户、单进程运行，复用同一个 `THSClient`。
+默认时区为 `Asia/Shanghai`，保证行情时间、交易时段和自然日缓存按北京时间处理。
+如需固定容器重建后的设备指纹，可在 `.env` 中设置 `THS_IMEI`。
+默认仅向本机开放端口；需要远程访问时请配置鉴权/反向代理，勿直接暴露公网。
+
+#### 缓存持久化
+
+容器中 `HOME=/home/app`，主要磁盘缓存位于：
+
+| 容器路径 | 内容 |
+| --- | --- |
+| `/home/app/.ths_stock_codes.json` | 股票代码表（自然日缓存） |
+| `/home/app/.ths_ip_state.json` | 服务器测速排序和轮换状态（有过期时间） |
+| `/home/app/.thspypc/stockname/` | 分组股票名称缓存 |
+| `/home/app/.thspypc/blockupdate/` | 系统板块 ZIP 解包数据及每日更新标记 |
+
+上面的命令使用 Docker 命名卷 `thspypc-cache`（不存在时自动创建），
+挂载整个 `/home/app`，而不只是 `.thspypc`，以覆盖散落在 home 下的 JSON 文件。
+删除并重建容器时，继续挂载同名卷即可复用缓存；不挂载时，缓存仅保留在
+当前容器中，删除容器即丢失。接口响应缓存仍在内存中，不会随卷持久化。
+
+若希望文件直接落在宿主机，将挂载参数替换为
+`--mount type=bind,source=/绝对路径/ths-cache,target=/home/app`。
+需先创建该目录，并确保容器用户 `app`（UID `10001`）具有读写权限；
+Linux 上可对专用缓存目录执行 `sudo chown -R 10001 /绝对路径/ths-cache`。
+
+扫码登录功能另有 `/home/app/.ths_qr_credentials.json` 凭据文件
+（当前后端使用账号密码登录，不生成它）。若通过其他功能生成该文件，
+同样会保存在上述卷中，请按敏感凭据保护，勿提交或公开共享。
+
 ## 项目结构
 
 ```
