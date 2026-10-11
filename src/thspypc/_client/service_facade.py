@@ -1913,6 +1913,7 @@ class ServiceFacade:
         )
         # 页面刷新时 ranked 全量/quotes_ext 资金请求与本接口在同一对 L2 连接上
         # 并发竞争，偶发超时（实测隔次恢复）：失败重试一次。
+        failed_main = self._sock
         try:
             rows = self._run_default_service(
                 (capability,),
@@ -1926,6 +1927,10 @@ class ServiceFacade:
             )
         except (OSError, ProtocolError) as exc:
             logger.warning("dde_rank: 首次失败(%s)，重试一次", exc)
+            if capability is Capability.BASIC_QUOTE and isinstance(exc, OSError):
+                # Never resend into a broken socket (or a timed-out response
+                # stream). Recovery uses a new passport and rebinds MAIN.
+                self._recover_main_connection(failed_main)
             rows = self._run_default_service(
                 (capability,),
                 lambda: self._stock_list_service.dde_ranked(

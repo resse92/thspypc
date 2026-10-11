@@ -188,6 +188,8 @@ class THSClient(ConnectionPrimitives, ServiceFacade):
         # 保留 _sock_lock 名称兼容已有诊断脚本；语义从“只保护 send”升级为
         # “保护 send + 全部响应读取”。RLock 允许连接治理代码在同线程内复用。
         self._sock_lock = threading.RLock()
+        self._main_lifecycle_lock = threading.RLock()
+        self._shutting_down = False
         self._market_session = MarketSession(lambda: self._sock, self._sock_lock)
         self._realorder_lock = threading.Lock()         # 保护 9601 socket send
         self._board_lock = threading.RLock()            # 保护板块通道 socket
@@ -263,7 +265,7 @@ class THSClient(ConnectionPrimitives, ServiceFacade):
             ),
             do_tcp_login=lambda fields: self._do_tcp_login(fields),
             main_socket=lambda: self._sock,
-            connect_main=lambda: self.connect_main(),
+            connect_main=lambda failed: self._recover_main_connection(failed),
             main_lock=self._sock_lock,
             current_auth=lambda: self._auth,
             drop_main=lambda: self._drop_connection(),
@@ -305,6 +307,7 @@ class THSClient(ConnectionPrimitives, ServiceFacade):
             close_owned_sockets=self._close_owned_sockets,
             board_stats_socket=lambda: self._board_stats_sock,
             board_stats_lock=self._board_stats_lock,
+            recover_connection=self._recover_heartbeat_connection,
         )
 
     @property
@@ -1018,9 +1021,11 @@ class THSClient(ConnectionPrimitives, ServiceFacade):
         **直接复用现有连接**返回成功，不重新 login——这是 hexin 客户端的策略
         （连接还活着就别重连）。连接已断时正常走登录流程。
         """
-        return self._connection_factory.connect_main(
-            refresh_auth=refresh_auth
-        )
+        with self._main_lifecycle_lock:
+            self._shutting_down = False
+            return self._connection_factory.connect_main(
+                refresh_auth=refresh_auth or self._last_connect_ts > 0
+            )
 
     # ── 连接治理（避免反复 connect 触发 VerifyCode=-1）──
 
@@ -1066,14 +1071,56 @@ class THSClient(ConnectionPrimitives, ServiceFacade):
         return True
 
     def _ensure_main_connection(self) -> None:
-        """按需建立 MAIN，不要求调用方预先调用 :meth:`connect`。"""
-        if self._sock is not None:
-            return
-        result = self.connect_main()
-        if not result.success or self._sock is None:
-            raise RuntimeError(
-                f"MAIN 连接失败: {result.error or result.detail}"
-            )
+        """Reuse a live MAIN or rebuild a dead generation with a fresh passport."""
+        with self._main_lifecycle_lock:
+            if self.is_connected:
+                return
+            self._recover_main_connection(self._sock)
+
+    def _recover_main_connection(self, failed_socket) -> LoginResult:
+        """Single-flight MAIN recovery, scoped to the socket that failed."""
+        with self._main_lifecycle_lock:
+            if self._shutting_down:
+                raise ConnectionError("客户端已关闭，取消 MAIN 重连")
+            current = self._sock
+            if current is not failed_socket and self.is_connected:
+                # Another request/heartbeat already replaced this generation.
+                return LoginResult(success=True, server="(reused)")
+            if current is not None:
+                with self._sock_lock:
+                    self._sock = None
+                    try:
+                        current.close()
+                    except OSError:
+                        pass
+                from .codecs.framing import unregister_frame_observer
+
+                unregister_frame_observer(current)
+                if self._service_connections is not None:
+                    self._service_connections.close_if_socket(ConnectionRole.MAIN, current)
+            # A successful login consumed the old passport, even on the same IP.
+            result = self.connect_main(refresh_auth=True)
+            if not result.success or self._sock is None:
+                raise ConnectionError(
+                    f"MAIN 重连失败: {result.error or result.detail}"
+                )
+            if self._service_connections is not None:
+                self.sync_service_connections()
+            return result
+
+    def _recover_heartbeat_connection(self, lane: str, failed_socket) -> None:
+        with self._main_lifecycle_lock:
+            if self._shutting_down:
+                raise ConnectionError("客户端已关闭，取消心跳重连")
+            if lane == "main":
+                self._recover_main_connection(failed_socket)
+            elif lane == "kline_fast" and self._service_connections is not None:
+                manager = self._service_connections
+                current = manager.peek(ConnectionRole.KLINE_FAST)
+                if current is not None and current.socket is not failed_socket:
+                    return
+                manager.close_if_socket(ConnectionRole.KLINE_FAST, failed_socket)
+                manager.acquire(ConnectionRole.KLINE_FAST, capability=Capability.BASIC_QUOTE)
 
     def _init_blocks(self) -> None:
         """初始化板块/自选股管理（HTTPS cookie 鉴权）。
@@ -1581,9 +1628,11 @@ class THSClient(ConnectionPrimitives, ServiceFacade):
         长连接反复查询，避免反复 disconnect/connect 触发 VerifyCode=-1
         （同账号同 IP 短时间重复 login 的会话冲突，见 docs/handoffs/HANDOFF.md §7）。
         """
-        if self._board_keepalive is not None:
-            self._board_keepalive.stop()
-        self._connection_runtime.disconnect()
+        with self._main_lifecycle_lock:
+            self._shutting_down = True
+            if self._board_keepalive is not None:
+                self._board_keepalive.stop()
+            self._connection_runtime.disconnect()
 
     def _close_owned_sockets(self) -> None:
         """Close facade-owned MAIN/REALORDER sockets for runtime shutdown."""

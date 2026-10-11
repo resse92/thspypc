@@ -55,7 +55,7 @@ class ConnectionFactory:
         authenticate: Callable[..., Any],
         do_tcp_login: Callable[[dict], Any],
         main_socket: Callable[[], Any],
-        connect_main: Callable[[], Any],
+        connect_main: Callable[[Any], Any],
         main_lock: Any,
         current_auth: Callable[[], dict | None],
         drop_main: Callable[[], None],
@@ -149,8 +149,9 @@ class ConnectionFactory:
     def open(self, spec) -> OpenedConnection:
         """Open one role-ready socket while the facade retains socket ownership."""
         if spec.role is ConnectionRole.MAIN:
-            if self._main_socket() is None:
-                result = self._connect_main()
+            failed_socket = self._main_socket()
+            if failed_socket is None or not self._is_connected():
+                result = self._connect_main(failed_socket)
                 if not result.success or self._main_socket() is None:
                     raise OSError(
                         f"MAIN 登录失败: {result.error or result.detail}"
@@ -291,6 +292,7 @@ class ConnectionRuntime:
     HEARTBEAT_PROBE_INTERVAL_TICKS = 20
     HEARTBEAT_RESPONSE_TIMEOUT = 12.0
     HEARTBEAT_MISS_THRESHOLD = 2
+    RECOVERY_RETRY_INTERVAL = 20.0
 
     def __init__(
         self,
@@ -310,6 +312,7 @@ class ConnectionRuntime:
         close_owned_sockets: Callable[[], None],
         board_stats_socket: Callable[[], Any] | None = None,
         board_stats_lock: Any = None,
+        recover_connection: Callable[[str, Any], None] | None = None,
     ) -> None:
         self.enable_heartbeat = enable_heartbeat
         self._main_socket = main_socket
@@ -326,6 +329,15 @@ class ConnectionRuntime:
         self._close_owned_sockets = close_owned_sockets
         self._board_stats_socket = board_stats_socket
         self._board_stats_lock = board_stats_lock
+        self._recover_connection = recover_connection
+        self._recovery_lock = threading.Lock()
+        self._recovery_pending: dict[str, Any] = {}
+        self._recovery_last_attempt: dict[str, float] = {}
+        self._recovery_active = False
+        self._recovery_attempts = 0
+        self._recovery_successes = 0
+        self._recovery_failures = 0
+        self._disconnected = False
 
         self.heartbeat_thread: threading.Thread | None = None
         self.heartbeat_stop = threading.Event()
@@ -355,6 +367,7 @@ class ConnectionRuntime:
     def start_heartbeat(self) -> None:
         if not self.enable_heartbeat:
             return
+        self._disconnected = False
         if self.heartbeat_thread and self.heartbeat_thread.is_alive():
             return
         self.heartbeat_stop.clear()
@@ -374,12 +387,20 @@ class ConnectionRuntime:
 
     def heartbeat_status(self) -> dict[str, object]:
         """Return a lock-only heartbeat snapshot suitable for ``/api/status``."""
+        with self._recovery_lock:
+            recovery = {
+                "active": self._recovery_active,
+                "pending_lanes": list(self._recovery_pending),
+                "attempts": self._recovery_attempts,
+                "successes": self._recovery_successes,
+                "failures": self._recovery_failures,
+                "retry_interval_seconds": self.RECOVERY_RETRY_INTERVAL,
+            }
         return {
             "enabled": bool(self.enable_heartbeat),
-            # First deployment is deliberately diagnostic-only.  It proves
-            # ACK timing and false-positive rate before connection retirement
-            # is allowed to trigger a fresh Passport/login lifecycle.
-            "mode": "observe_only",
+            "mode": "recover_transport_errors",
+            "recovery_lanes": ["main", "kline_fast"],
+            "recovery": recovery,
             "probe_interval_seconds": (
                 self.HEARTBEAT_PROBE_INTERVAL_TICKS * 3
             ),
@@ -387,6 +408,72 @@ class ConnectionRuntime:
             "miss_threshold": self.HEARTBEAT_MISS_THRESHOLD,
             "lanes": self._heartbeat_monitor.snapshot(),
         }
+
+    def _schedule_connection_recovery(self, lane: str, sock: Any) -> bool:
+        """Recover confirmed transport failures off the dispatcher/beat thread.
+
+        Missing ACKs alone are not proof of a dead connection. Generation checks
+        in the client protect replacement sockets from late old-probe errors.
+        """
+        if (
+            not self.enable_heartbeat
+            or self._recover_connection is None
+            or lane not in ("main", "kline_fast")
+            or self.heartbeat_stop.is_set()
+        ):
+            return False
+        current = self._main_socket() if lane == "main" else None
+        if current is not None and current is not sock:
+            with self._recovery_lock:
+                if self._recovery_pending.get(lane) is sock:
+                    self._recovery_pending.pop(lane, None)
+            return False
+        with self._recovery_lock:
+            self._recovery_pending[lane] = sock
+            now = time.monotonic()
+            last_attempt = self._recovery_last_attempt.get(lane)
+            if self._recovery_active or (
+                last_attempt is not None
+                and now - last_attempt < self.RECOVERY_RETRY_INTERVAL
+            ):
+                return False
+            self._recovery_active = True
+            self._recovery_last_attempt[lane] = now
+            self._recovery_attempts += 1
+
+        def recover():
+            success = False
+            try:
+                if self.heartbeat_stop.is_set():
+                    return
+                self._recover_connection(lane, sock)
+                success = True
+                logger.info("%s 行情连接已恢复", lane)
+            except Exception as exc:
+                logger.warning("%s 行情连接恢复失败，稍后重试: %s", lane, exc)
+                # MAIN init temporarily stops beats. A failed init must not
+                # disable the loop responsible for retrying the recovery.
+                with self._recovery_lock:
+                    if not self._disconnected and self.heartbeat_stop.is_set():
+                        self.start_heartbeat()
+            finally:
+                with self._recovery_lock:
+                    self._recovery_active = False
+                    if success:
+                        self._recovery_successes += 1
+                        if self._recovery_pending.get(lane) is sock:
+                            self._recovery_pending.pop(lane, None)
+                    else:
+                        self._recovery_failures += 1
+
+        threading.Thread(target=recover, name="ths-recover", daemon=True).start()
+        return True
+
+    def _retry_connection_recoveries(self) -> None:
+        with self._recovery_lock:
+            pending = tuple(self._recovery_pending.items())
+        for lane, sock in pending:
+            self._schedule_connection_recovery(lane, sock)
 
     def _bind_heartbeat_lane(self, lane: str, sock: Any) -> None:
         self._heartbeat_monitor.bind(lane, sock)
@@ -462,6 +549,8 @@ class ConnectionRuntime:
                 else:
                     log = logger.debug
                 log("%s 心跳探针无下行响应（%s）: %s", lane, state, exc)
+                if state == "unresponsive" and not isinstance(exc, TimeoutError):
+                    self._schedule_connection_recovery(lane, sock)
 
     def _schedule_dispatch_probe(
         self,
@@ -501,6 +590,8 @@ class ConnectionRuntime:
                 if self._heartbeat_monitor.note_transport_failure(lane, sock):
                     state = "unresponsive"
             logger.debug("%s 心跳探针发送失败（%s）: %s", lane, state, exc)
+            if state == "unresponsive" and not isinstance(exc, TimeoutError):
+                self._schedule_connection_recovery(lane, sock)
             return False
         if future is None:
             self._heartbeat_monitor.cancel_probe(lane, sock, probe_id)
@@ -965,6 +1056,7 @@ class ConnectionRuntime:
             if self.heartbeat_stop.wait(3.0):
                 break
             tick += 1
+            self._retry_connection_recoveries()
             self._expire_raw_probes()
             manager = self._service_connections()
             main_sock = self._main_socket()
@@ -1000,6 +1092,8 @@ class ConnectionRuntime:
                         main_sock,
                     )
                     logger.debug("8901 心跳发送失败（不影响查询）: %s", exc)
+                    if not isinstance(exc, TimeoutError):
+                        self._schedule_connection_recovery("main", main_sock)
                 if tick % self.HEARTBEAT_PROBE_INTERVAL_TICKS == 0:
                     self.heartbeat_seq_main += 1
                     probe_token = int(time.monotonic() * 1000)
@@ -1041,6 +1135,8 @@ class ConnectionRuntime:
                             "KLINE_FAST heartbeat failed: %s",
                             exc,
                         )
+                        if not isinstance(exc, TimeoutError):
+                            self._schedule_connection_recovery("kline_fast", kline_sock)
                     if tick % self.HEARTBEAT_PROBE_INTERVAL_TICKS == 0:
                         self.heartbeat_seq_main += 1
                         probe_token = int(time.monotonic() * 1000)
@@ -1234,6 +1330,9 @@ class ConnectionRuntime:
                     )
 
     def disconnect(self) -> None:
+        with self._recovery_lock:
+            self._disconnected = True
+            self._recovery_pending.clear()
         self.stop_heartbeat()
         self.stop_snapshot()
         for sock in self._heartbeat_monitor.bound_sockets():

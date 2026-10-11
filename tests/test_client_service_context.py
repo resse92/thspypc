@@ -1788,8 +1788,8 @@ def test_controlled_opener_can_bridge_main_login(monkeypatch):
     sock = FakeSocket()
     login_calls = []
 
-    def connect_main():
-        login_calls.append(True)
+    def connect_main(*, refresh_auth=False):
+        login_calls.append(refresh_auth)
         client._sock = sock
         return LoginResult(success=True)
 

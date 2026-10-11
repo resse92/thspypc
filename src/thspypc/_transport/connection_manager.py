@@ -51,6 +51,9 @@ class ConnectionManager:
         self._specs = dict(specs)
         self._connections: dict[ConnectionRole, ManagedConnection] = {}
         self._lock = threading.RLock()
+        # Socket opening may authenticate and acquire a lifecycle/request lock.
+        # Never hold the registry lock across that work; serialize per role.
+        self._open_locks = {role: threading.RLock() for role in self._specs}
 
     @property
     def profile(self) -> AccountProfile:
@@ -145,23 +148,17 @@ class ConnectionManager:
         *,
         capability: Capability | None = None,
     ) -> ManagedConnection:
-        stale: ManagedConnection | None = None
-        with self._lock:
-            spec = self._validate_role(role, capability=capability)
-            current = self._connections.get(role)
-            if current is not None and current.active:
+        with self._open_locks[role]:
+            with self._lock:
+                spec = self._validate_role(role, capability=capability)
+            current = self.peek(role)
+            if current is not None:
                 if current.is_alive:
                     return current
-                # 服务器已关闭该连接（例如 L2 预热 socket 空闲后被 FIN），
-                # 本地 socket 对象仍在；移除后走 opener 重建，避免业务请求
-                # 发到死连接上。
-                self._connections.pop(role, None)
-                stale = current
+                self.close_if_socket(role, current.socket)
             try:
                 opened = self._opener(spec)
             except Exception as exc:
-                if stale is not None:
-                    stale.close()
                 raise ChannelUnavailableError(
                     role.value, str(exc)
                 ) from exc
@@ -179,19 +176,16 @@ class ConnectionManager:
                 raise ChannelUnavailableError(
                     role.value, "连接工厂未返回 socket"
                 )
-            # The opener contract returns a fully authenticated, role-ready
-            # socket. Adopted legacy sockets carry explicit init evidence.
-            connection = ManagedConnection(
-                spec,
-                sock,
-                request_lock=request_lock,
-                owns_socket=owns_socket,
-                initialized=initialized,
-            )
-            self._connections[role] = connection
-        if stale is not None:
-            stale.close()
-        return connection
+            try:
+                return self.adopt(
+                    role, sock, capability=capability,
+                    request_lock=request_lock, owns_socket=owns_socket,
+                    initialized=initialized,
+                )
+            except Exception:
+                if owns_socket:
+                    sock.close()
+                raise
 
     def adopt(
         self,
@@ -255,6 +249,16 @@ class ConnectionManager:
             connection = self._connections.pop(role, None)
         if connection is not None:
             connection.close()
+
+    def close_if_socket(self, role: ConnectionRole, sock: CloseableSocket) -> bool:
+        """Retire only the failed generation, never a concurrently replaced one."""
+        with self._lock:
+            connection = self._connections.get(role)
+            if connection is None or connection.socket is not sock:
+                return False
+            self._connections.pop(role)
+        connection.close()
+        return True
 
     def close_all(self) -> None:
         with self._lock:

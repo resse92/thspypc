@@ -29,7 +29,17 @@ def _manager(kind, sock):
         kind=kind,
         capabilities=capabilities,
     )
-    return ConnectionManager(profile, lambda _spec: sock)
+    sockets = {}
+
+    def opener(spec):
+        # Roles have independent sockets in production; retain one combined
+        # send log so the assertions below can verify cross-role wire order.
+        current = sock if not sockets else FakeSocket()
+        current.sent = sock.sent
+        sockets[spec.role] = current
+        return current
+
+    return ConnectionManager(profile, opener)
 
 
 def test_normal_constituents_waits_for_sort_codes_before_quote(monkeypatch):

@@ -805,6 +805,12 @@ dev.bat   # Windows cmd
 K 线可通过 `channel=level2` 显式使用 L2，Python 显式配置的 Level2
 service context 也保留原路由。基础路径不保证提供 L2 扩展字段或相同采样密度。
 
+MAIN 与独立 K 线连接保留 3 秒心跳和 60 秒响应探针。明确的 TCP 断连/
+写入错误会触发后台单次恢复，失败后按 20 秒间隔重试；仅 ACK 缺失不会
+触发重登录。`/api/status` 的 `heartbeat.recovery` 展示恢复状态和计数。
+DDE 的 MAIN 请求遇到传输错误时会用新通行证重新建连，再重试一次，
+不会向同一条失效 socket 原样重发。L2 等其他通道仍使用原有恢复机制。
+
 在仓库根目录构建并启动 FastAPI 后端（不包含 React 前端）。
 镜像构建和运行均使用 Python 3.14，与 `.python-version` 和开发启动脚本一致：
 
