@@ -13,7 +13,7 @@ import time
 from typing import Any
 
 from ..features.auth_protocol import LoginIdentity
-from ..models import Capability, Support
+from ..models import AccountKind, Capability, Support
 from ..protocol import (
     MARKET_PORT,
     REALORDER_HOST,
@@ -1101,7 +1101,10 @@ class ConnectionPrimitives:
             """
             profile = material.profile
             passport64 = material.passport64
-            level2 = profile.supports_manual_identity
+            level2 = (
+                profile.supports_manual_identity
+                and self._basic_routing_profile().kind is AccountKind.LEVEL2
+            )
             if constituent_side == "sz" and not level2:
                 raise OSError("普通账号没有独立的深市板块成分连接")
             if constituent_side == "sh":

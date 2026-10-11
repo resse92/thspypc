@@ -58,6 +58,30 @@ from .protocol import (
 logger = logging.getLogger(__name__)
 
 
+class _BasicConnectionView:
+    """Route basic services independently of account entitlement and L2 leases.
+
+    The registry, sockets, capabilities, and locks remain shared. Only the
+    routing kind is projected; observed account evidence is never rewritten.
+    Explicitly configured service contexts retain their requested topology.
+    """
+
+    def __init__(self, client, manager):
+        self._client = client
+        self._manager = manager
+
+    @property
+    def source_profile(self):
+        return self._manager.profile
+
+    @property
+    def profile(self):
+        return self._client._basic_routing_profile()
+
+    def __getattr__(self, name):
+        return getattr(self._manager, name)
+
+
 @dataclass
 class LoginResult:
     """登录结果，含诊断信息。"""
@@ -396,8 +420,13 @@ class THSClient(ConnectionPrimitives, ServiceFacade):
             self._list_bucket_service = ListBucketCoordinator(
                 unsolicited=self._connection_runtime.deliver_market_push,
             )
+            basic_connections = (
+                _BasicConnectionView(self, self._service_connections)
+                if self._service_auto_profile
+                else self._service_connections
+            )
             self._kline_service = KlineService(
-                self._service_connections,
+                basic_connections,
                 evidence=self._account_evidence,
             )
             self._market_snapshot_service = MarketSnapshotService(
@@ -405,25 +434,25 @@ class THSClient(ConnectionPrimitives, ServiceFacade):
                 evidence=self._account_evidence,
             )
             self._quote_service = QuoteService(
-                self._service_connections,
+                basic_connections,
                 evidence=self._account_evidence,
                 subscriptions=self._service_subscriptions,
             )
             self._stock_list_service = StockListService(
-                self._service_connections,
+                basic_connections,
                 evidence=self._account_evidence,
             )
             self._stock_name_service = StockNameService(
-                self._service_connections,
+                basic_connections,
                 evidence=self._account_evidence,
             )
             self._timeline_service = TimelineService(
-                self._service_connections,
+                basic_connections,
                 subscriptions=self._service_subscriptions,
                 evidence=self._account_evidence,
             )
             self._auction_service = AuctionService(
-                self._service_connections,
+                basic_connections,
                 subscriptions=self._service_subscriptions,
                 evidence=self._account_evidence,
             )
@@ -438,7 +467,7 @@ class THSClient(ConnectionPrimitives, ServiceFacade):
                 self._next_request_instance,
             )
             self._board_service = BoardService(
-                self._service_connections,
+                basic_connections,
             )
             self._board_stats_service = BoardStatsService(
                 self._service_connections,
@@ -515,14 +544,25 @@ class THSClient(ConnectionPrimitives, ServiceFacade):
             operation,
         )
 
-    def preheat_service_connections(self) -> dict[str, dict[str, object]]:
-        """Pre-open the market lanes used by the current account profile.
+    def _basic_routing_profile(self) -> AccountProfile:
+        """Default basic requests to MAIN without changing account evidence."""
+        manager = self._service_connections
+        profile = manager.profile if manager is not None else self.observed_account_profile
+        if manager is not None and not self._service_auto_profile:
+            return profile
+        return AccountProfile(
+            kind=AccountKind.STANDARD,
+            capabilities=profile.capabilities,
+            passport_fields=profile.passport_fields,
+        )
 
-        Level2 Web K线复用 SH_L2/SZ_L2 的 pageid=1334，不再预建独立的
-        BASIC/MAIN KLINE_FAST；普通账号没有 L2，仍预建 KLINE_FAST。
-        并行 L2 建连时每条连接各取一代 Passport64（一票一连接）。
+    def preheat_service_connections(self) -> dict[str, dict[str, object]]:
+        """Pre-open L1 KLINE_FAST by default, without probing L2 entitlement.
+
+        Explicit Level2 service contexts retain SH_L2/SZ_L2 preheating.
+        Each new socket uses a fresh passport, independent of existing sockets.
         """
-        profile = self.observed_account_profile
+        profile = self._basic_routing_profile()
         skipped = {"ready": False, "skipped": True}
         if profile.kind is not AccountKind.LEVEL2:
             results = {
@@ -712,11 +752,15 @@ class THSClient(ConnectionPrimitives, ServiceFacade):
         """
         profile = self._default_service_profile(capabilities)
         if self._service_connections is None:
-            manager = self.configure_service_context(
-                profile,
-                allow_open=True,
-            )
             self._service_auto_profile = True
+            try:
+                manager = self.configure_service_context(
+                    profile,
+                    allow_open=True,
+                )
+            except Exception:
+                self._service_auto_profile = False
+                raise
             return manager
 
         if self._service_auto_profile:
@@ -1674,4 +1718,3 @@ def load_ip_state(path: str | None = None,
     except (KeyError, TypeError, ValueError) as e:
         logger.debug("IP 状态缓存（v1）读取失败（将忽略）: %s", e)
         return None
-

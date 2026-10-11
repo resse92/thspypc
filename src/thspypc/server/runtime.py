@@ -283,7 +283,7 @@ class ThsRuntime:
         *,
         market: int = 0,
     ) -> dict:
-        """Complete the one-time 4214 registration before page requests fan out."""
+        """Prepare basic stock panels without requiring a Level2 connection."""
         resolved_market = self.call(
             lambda client: client.market_events_prepare(
                 code,

@@ -798,6 +798,13 @@ dev.bat   # Windows cmd
 
 ### Docker 运行后端
 
+基础接口默认使用 L1 路径（报价、五档、K 线、当日/历史分时、竞价、
+基础榜单、代码表及板块行情），不会因为账号具有 L2 权限而自动升级。
+`/api/stock-ready/{code}` 也不要求 L2 注册。账号实际类型和权限仍按鉴权证据展示。
+沪深逐笔、委托队列、十档盘口和实时事件推送等 L2 专属功能保持不变；
+K 线可通过 `channel=level2` 显式使用 L2，Python 显式配置的 Level2
+service context 也保留原路由。基础路径不保证提供 L2 扩展字段或相同采样密度。
+
 在仓库根目录构建并启动 FastAPI 后端（不包含 React 前端）。
 镜像构建和运行均使用 Python 3.14，与 `.python-version` 和开发启动脚本一致：
 

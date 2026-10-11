@@ -373,7 +373,7 @@ def create_app(runtime: ThsRuntime | None = None) -> FastAPI:
         anchor: int = 0,
         fuquan: str = "Q",
         market: int = 0,
-        channel: str = "auto",
+        channel: str = Query("auto", description="默认基础行情；level2 显式请求 L2，ifindhq_fast 使用独立基础 K 线通道"),
     ) -> list[dict]:
         intraday_period = period in {
             "1min", "5min", "15min", "30min", "60min",
@@ -860,7 +860,7 @@ def create_app(runtime: ThsRuntime | None = None) -> FastAPI:
 
     @app.get("/api/stock-ready/{code}")
     def stock_ready(code: str, market: int = 0) -> dict:
-        """Register one stock once before HTTP panels and WebSocket fan out."""
+        """Prepare basic stock panels; Level2 consumers register independently."""
         # 必须走 _call：prepare_stock_stream 内部的 L2 建连失败会抛
         # ChannelUnavailableError，直接调用会裸奔成 500+traceback（2026-09-09
         # 日志实测）；走 _call 翻译为 502 并做一次请求内重建恢复。

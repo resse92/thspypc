@@ -318,7 +318,7 @@ class ServiceFacade:
         Call after login to refresh the full stock-name list.
         """
         material = self._auth_service.require_current()
-        account_kind = self.observed_account_profile.kind
+        account_kind = self._basic_routing_profile().kind
 
         def login_body_factory(group_key: str) -> bytes:
             identity = name_group_login_identity(group_key)
@@ -355,7 +355,7 @@ class ServiceFacade:
             ``{"names": {code: name}, "by_segment": {}, "skipped": [], "segments": []}``.
         """
         material = self._auth_service.require_current()
-        account_kind = self.observed_account_profile.kind
+        account_kind = self._basic_routing_profile().kind
 
         def login_body_factory(group_key: str) -> bytes:
             identity = name_group_login_identity(group_key)
@@ -774,13 +774,9 @@ class ServiceFacade:
         if market == 0:
             market = self._market_for_code(code)
 
-        # 按账号类型选 capability：普通=BASIC_QUOTE(MAIN)，Level2=L2_TIMELINE(L2连接)
-        # 2026-08-05 抓包对齐：Level2 K线走 pageid=1334 + L2 连接（见 build_kline_l2_query）
-        profile = (
-            self._service_connections.profile
-            if self._service_connections is not None
-            else self.observed_account_profile
-        )
+        # 基础路由默认 MAIN，不因账号权限升级；显式 level2 或显式 service
+        # context 保留 L2 K线（pageid=1334）路径。
+        profile = self._basic_routing_profile()
         if channel not in ("auto", "level2", "ifindhq_fast"):
             raise ValueError(
                 "channel must be auto, level2, or ifindhq_fast"
@@ -917,8 +913,8 @@ class ServiceFacade:
     ) -> list[dict]:
         """查当日分时图（含指数白线及领先线）。
 
-        普通账号走 MAIN 上的 ``pageid=9355`` 请求-响应；Level2 账号走
-        ``pageid=4214`` 的市场专用通道。两种响应统一返回逐点行情记录。
+        默认走 MAIN 上的基础分时，不按账号权限自动升级 L2；显式配置
+        Level2 service context 时才使用市场专用通道。
 
         Args:
             code: 股票或指数代码（如 ``"000938"``、``"1A0001"``）。
@@ -940,11 +936,7 @@ class ServiceFacade:
         market = _intraday_market(market)
         if self._auth is None and self._service_connections is None:
             self.authenticate()
-        profile = (
-            self._service_connections.profile
-            if self._service_connections is not None
-            else self.observed_account_profile
-        )
+        profile = self._basic_routing_profile()
         capability = (
             Capability.BASIC_TIMELINE
             if profile.kind is AccountKind.STANDARD
@@ -982,10 +974,9 @@ class ServiceFacade:
     ) -> list[dict]:
         """查集合竞价（9:15-9:25 的撮合价、领先价、累计量及未匹配量）。
 
-        普通账号走 MAIN：竞价时段的当天请求用 ``pageid=9354/period=7176``，
-        非竞价时段及历史交易日用 ``pageid=9355/period=6144``；账号类型未知时
-        也优先走基础 MAIN 路径。
-        Level2 账号：竞价时段(9:15-9:25)走
+        默认走 MAIN：竞价时段的当天请求用 ``pageid=9354/period=7176``，
+        非竞价时段及历史交易日用 ``pageid=9355/period=6144``。
+        显式 Level2 service context：竞价时段(9:15-9:25)走
         ``pageid=1334/period=7176`` 实时路径拿实时撮合；**非竞价时段走 L2
         历史路径 pageid=4417** 拿当日完整竞价序列(~39ms)，避免实时路径在非竞价
         时段死等 timeout(盘后偶发 12s+)。沪深指数改走 ``pageid=6240`` 的
@@ -1023,11 +1014,7 @@ class ServiceFacade:
         market = _intraday_market(market)
         if self._auth is None and self._service_connections is None:
             self.authenticate()
-        profile = (
-            self._service_connections.profile
-            if self._service_connections is not None
-            else self.observed_account_profile
-        )
+        profile = self._basic_routing_profile()
         capability = (
             Capability.L2_AUCTION
             if profile.kind is AccountKind.LEVEL2
@@ -1337,8 +1324,8 @@ class ServiceFacade:
     ) -> list[dict]:
         """查 14:57-15:00 尾盘集合竞价逐点行情。
 
-        普通及未知类型账号走 MAIN：当天 ``pageid=9354``，历史日 ``pageid=9355``。
-        Level2 账号走对应市场连接：当天 ``pageid=4214``，历史日
+        默认走 MAIN：当天 ``pageid=9354``，历史日 ``pageid=9355``。
+        显式 Level2 service context 走对应市场连接：当天 ``pageid=4214``，历史日
         ``pageid=4417``。两类账号都使用 ``period=7424``，但连接、页号和
         请求头不混用。
         """
@@ -1347,11 +1334,7 @@ class ServiceFacade:
         market = _intraday_market(market)
         if self._auth is None and self._service_connections is None:
             self.authenticate()
-        profile = (
-            self._service_connections.profile
-            if self._service_connections is not None
-            else self.observed_account_profile
-        )
+        profile = self._basic_routing_profile()
         capability = (
             Capability.L2_AUCTION
             if profile.kind is AccountKind.LEVEL2
@@ -1399,11 +1382,7 @@ class ServiceFacade:
         # 历史同一协议，2026-09-08 抓包对齐）；分时主体当日走 1 分钟K合成，
         # 历史日期走 pageid=10444 的 8192 packed-date bar 窗；无尾盘竞价。
         bse_stock = market == 151
-        profile = (
-            self._service_connections.profile
-            if self._service_connections is not None
-            else self.observed_account_profile
-        )
+        profile = self._basic_routing_profile()
         if (
             profile.kind is AccountKind.LEVEL2
             and market not in (16, 32, 144, 151)
@@ -1744,11 +1723,7 @@ class ServiceFacade:
                 trade_date=value,
                 timeout=timeout,
             )
-        profile = (
-            self._service_connections.profile
-            if self._service_connections is not None
-            else self.observed_account_profile
-        )
+        profile = self._basic_routing_profile()
         if (
             profile.kind is AccountKind.LEVEL2
             and market not in (16, 32, 144, 151)
@@ -1794,16 +1769,16 @@ class ServiceFacade:
     ) -> list[dict]:
         """查**历史分时（回忆）**：某交易日的逐点分时行情（现价/量额/level2 大单）。
 
-        个股按账号走 ``pageid=9355/4417``；指数走抓包一致的
+        默认个股走 MAIN ``pageid=9355``，显式 Level2 service context 走
+        ``pageid=4417``；指数走抓包一致的
         ``pageid=77``。日期游标编码由服务自动选择。
 
         **与当日分时的区别**：Level2 历史响应包含 201-230 大单字段；普通账号
         返回基础价量额字段，不虚构无权限字段。
 
         响应若为 ``cmd=0x0a`` 会先解开 8901 字典压缩；指数和个股块再按 241 点
-        ``bar_index`` 序列锚定。请求固定走已实测成功的
-        ``Level2 passport + 对应市场 L2 服务器 + init`` 通道，并与同一市场上的其他
-        请求/读取严格串行。服务器偶发返回连 bar 高位也省略的强状态变体，
+        ``bar_index`` 序列锚定。同一连接的请求/读取严格串行，账号实际权限
+        不改变默认的基础请求路径。服务器偶发返回连 bar 高位也省略的强状态变体，
         解析器只返回可安全验证的点；``retries`` 不能代替完整状态机解码。
 
         Args:
@@ -1846,11 +1821,7 @@ class ServiceFacade:
                     last_err = f"HTTP 鉴权失败: {exc}"
                     continue
             try:
-                profile = (
-                    self._service_connections.profile
-                    if self._service_connections is not None
-                    else self.observed_account_profile
-                )
+                profile = self._basic_routing_profile()
                 capability = (
                     Capability.BASIC_HISTORY_TIMELINE
                     if profile.kind is AccountKind.STANDARD
@@ -1926,9 +1897,8 @@ class ServiceFacade:
     ) -> list[dict]:
         """Return the desktop DDE page ranking (pageid=10723).
 
-        Standard accounts use the combined MAIN request.  Level2 accounts use
-        the captured SH/SZ split routes and the two server rankings are merged
-        globally by their decoded numeric value.
+        Default requests use the combined MAIN request. Explicit Level2 service
+        contexts use the SH/SZ split routes and merge their server rankings.
 
         Each row contains ``code``, ``market``, ``value``, ``sort_by`` and
         ``response_field``.  Verified DDE sort keys are 592888 (default main
@@ -1938,7 +1908,7 @@ class ServiceFacade:
         self._ensure_main_connection()
         capability = (
             Capability.L2_MARKET_ACCESS
-            if self.observed_account_profile.kind is AccountKind.LEVEL2
+            if self._basic_routing_profile().kind is AccountKind.LEVEL2
             else Capability.BASIC_QUOTE
         )
         # 页面刷新时 ranked 全量/quotes_ext 资金请求与本接口在同一对 L2 连接上
@@ -2031,12 +2001,10 @@ class ServiceFacade:
             RuntimeError: 未登录。
         """
         self._ensure_main_connection()
-        # 2026-08-14 客户端抓包确认：Level2 排序榜拆 SH_L2/SZ_L2 两条连接
-        # （pageid=1341），普通账号走 MAIN 单请求（pageid=1334）。授权
-        # capability 与 dde_rank 同理按账号类型选择。
+        # 默认基础榜单走 MAIN；显式 Level2 context 才使用 SH_L2/SZ_L2。
         capability = (
             Capability.L2_MARKET_ACCESS
-            if self.observed_account_profile.kind is AccountKind.LEVEL2
+            if self._basic_routing_profile().kind is AccountKind.LEVEL2
             else Capability.BASIC_QUOTE
         )
         stocks = self._run_default_service(
@@ -2228,7 +2196,7 @@ class ServiceFacade:
         """
         self._ensure_main_connection()
         capabilities: tuple[Capability, ...] = (Capability.BASIC_QUOTE,)
-        if self.observed_account_profile.kind is AccountKind.LEVEL2:
+        if self._basic_routing_profile().kind is AccountKind.LEVEL2:
             # Level2 的深市代码表在 SZ_L2（szlv2）：乐观租借
             # L2_MARKET_ACCESS 让 full_list 能开 SZ 通道合并深市表。
             capabilities = (Capability.BASIC_QUOTE, Capability.L2_MARKET_ACCESS)
@@ -2418,13 +2386,17 @@ class ServiceFacade:
         code: str,
         market: int | None = None,
     ) -> int:
-        """Register *code* on its existing L2 lane without starting a reader.
+        """Prepare basic stock panels without requiring L2 registration.
 
-        The web stock-switch gate calls this once before depth, timeline,
-        superorder and WebSocket consumers fan out.  The connection-scoped
-        coordinator makes repeated calls idempotent; no new client, socket or
-        Passport is created.
+        Explicit Level2 contexts retain the old registration gate. Dedicated
+        L2 consumers register their own shared lane when requested.
         """
+        if self._basic_routing_profile().kind is not AccountKind.LEVEL2:
+            resolved = self._market_for_code(code) if market in (None, 0) else market
+            if resolved == 151:
+                return resolved
+            self._ensure_main_connection()
+            return resolved
         return self._register_l2_snapshot_code(code, market=market)
 
     def ranking_depth_subscribe(
@@ -3063,10 +3035,9 @@ class ServiceFacade:
             # 不抛 400/500（bridge 失败通常是当日名称组尚未拉取）。
             return []
         records = self._run_default_service(
-            (
-                Capability.BASIC_QUOTE,
-                Capability.L2_MARKET_ACCESS,
-            ),
+            (Capability.BASIC_QUOTE, Capability.L2_MARKET_ACCESS)
+            if self._basic_routing_profile().kind is AccountKind.LEVEL2
+            else (Capability.BASIC_QUOTE,),
             lambda: self._board_service.board_constituents(
                 stock_codes,
                 stock_markets=stock_markets,

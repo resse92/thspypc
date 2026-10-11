@@ -402,6 +402,7 @@ class QuoteService:
     ) -> DepthQuote:
         """Level2 十档：走对应市场 L2 连接（沪 shlv2 / 深 szlv2），先 4214 注册。"""
         profile = self._connections.profile
+        profile = getattr(self._connections, "source_profile", profile)
         if profile.kind is AccountKind.STANDARD:
             raise CapabilityUnavailableError(
                 Capability.L2_SNAPSHOT_PUSH,

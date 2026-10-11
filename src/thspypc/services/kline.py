@@ -82,6 +82,8 @@ class KlineService:
                 "K-line channel must be auto, level2, or ifindhq_fast"
             )
         profile = self._connections.profile
+        if channel == "level2":
+            profile = getattr(self._connections, "source_profile", profile)
         use_l2 = (
             profile.kind is AccountKind.LEVEL2
             if channel == "auto"
