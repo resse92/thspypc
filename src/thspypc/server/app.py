@@ -1040,6 +1040,14 @@ def create_app(runtime: ThsRuntime | None = None) -> FastAPI:
         return _call(lambda client: client.market_snapshot())
 
     # ── 板块 ──
+    @app.get("/api/stock/{code}/concepts")
+    def stock_concepts(code: str) -> list[dict]:
+        """查询股票所属概念板块，未匹配到概念时返回空列表。"""
+        if len(code) != 6 or not code.isascii() or not code.isdigit():
+            raise HTTPException(400, "股票代码必须是 6 位数字，如 000001")
+        result = _call(lambda client: client.stock_concepts(code))
+        return [_to_dict(item) for item in result]
+
     @app.get("/api/boards")
     def boards(category: str | None = None) -> list[dict]:
         result = _call(lambda client: client.list_system_blocks(category=category))

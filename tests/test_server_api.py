@@ -40,6 +40,14 @@ class FakeClient:
         self.is_connected = True
         return _Result()
 
+    def stock_concepts(self, code):
+        from thspypc.features.system_blocks import SystemBlock
+
+        self.calls.append(("stock_concepts", code))
+        if code == "000001":
+            return []
+        return [SystemBlock("C024", "BC电池", "concept", "概念", "block_2B.ini")]
+
     def _market_for_code(self, code):
         # 与 THSClient._market_for_code 的基础映射一致（测试桩无名称缓存，不做 ST 覆盖）
         if code.startswith(("1A", "1B")):
@@ -313,6 +321,26 @@ def test_status_and_connect(client_and_app):
     resp = client.post("/api/connect").json()
     assert resp["success"] is True
     assert fake.calls[0] == ("connect",)
+
+
+def test_stock_concepts_api(client_and_app):
+    fake, client = client_and_app
+    response = client.get("/api/stock/688981/concepts")
+    assert response.status_code == 200
+    assert response.json() == [{
+        "block_id": "C024", "name": "BC电池", "category": "concept",
+        "category_name": "概念", "source": "block_2B.ini", "parent_id": None,
+    }]
+    assert ("stock_concepts", "688981") in fake.calls
+    assert client.get("/api/stock/000001/concepts").json() == []
+
+
+@pytest.mark.parametrize("code", ["1", "SH688981", "abcdef", "１２３４５６"])
+def test_stock_concepts_api_invalid_code(client_and_app, code):
+    fake, client = client_and_app
+    response = client.get(f"/api/stock/{code}/concepts")
+    assert response.status_code == 400
+    assert fake.calls == []
 
 
 @pytest.mark.parametrize("password", ["offline-password", ""])

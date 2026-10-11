@@ -674,11 +674,13 @@ class SystemBlocksService:
         raise SystemBlocksError(f"板块不存在: {block_id}")
 
     @_blockupdate_locked
-    def stock_boards(self, code: str) -> list[SystemBlock]:
-        """反向查询：某只股票所属的全部系统板块（行业 + 概念等）。"""
+    def stock_boards(
+        self, code: str, category: str | None = None,
+    ) -> list[SystemBlock]:
+        """反向查询股票所属板块，可按分类限制（如 concept）。"""
         code = code.strip()
         result: list[SystemBlock] = []
-        for board in self.boards():
+        for board in self.boards(category):
             try:
                 stocks = self.constituents(board.block_id)
             except SystemBlocksError:

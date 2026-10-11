@@ -234,6 +234,23 @@ def test_service_missing_install_raises():
         SystemBlocksService(block_update_dir=r"C:\__no_such_ths_dir__")
 
 
+def test_stock_concepts(tmp_path):
+    from thspypc.client import THSClient
+
+    service = _write_service_fixture(tmp_path)
+    client = THSClient.__new__(THSClient)
+    client._system_blocks = service
+    concepts = client.stock_concepts("688981")
+    assert [board.block_id for board in concepts] == ["C024"]
+    assert all(board.category == "concept" for board in concepts)
+    assert "881121" in {board.block_id for board in service.stock_boards("688981")}
+    assert client.stock_concepts("000001") == []
+    assert client.stock_concepts(" 688981 ") == concepts
+    for code in ("1", "SH688981", "abcdef", "１２３４５６"):
+        with pytest.raises(ValueError, match="6 位数字"):
+            client.stock_concepts(code)
+
+
 @pytest.mark.parametrize("hour,minute,expected_day,expected_hour", [
     (7, 59, 1, 8), (8, 0, 1, 18), (17, 59, 1, 18),
     (18, 0, 2, 8), (23, 59, 2, 8),

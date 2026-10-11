@@ -1518,6 +1518,13 @@ class THSClient(ConnectionPrimitives, ServiceFacade):
         """
         return self.system_blocks.boards(category)
 
+    def stock_concepts(self, code: str):
+        """查询股票所属概念板块，复用本地板块缓存，无需行情登录。"""
+        code = code.strip()
+        if len(code) != 6 or not code.isascii() or not code.isdigit():
+            raise ValueError("股票代码必须是 6 位数字，如 000001")
+        return self.system_blocks.stock_boards(code, category="concept")
+
     def get_system_block_constituents(self, block_id: str):
         """返回系统板块成分股（稳定 ID → 成分股）。
 
