@@ -26,6 +26,7 @@ from ..errors import (
     UnsupportedAccountFeatureError,
 )
 from .runtime import ThsRuntime
+from ..services.system_blocks import BlockUpdateScheduler
 
 logger = logging.getLogger(__name__)
 from .._transport.timing import (
@@ -103,10 +104,13 @@ def create_app(runtime: ThsRuntime | None = None) -> FastAPI:
 
     @asynccontextmanager
     async def lifespan(_app: FastAPI):
-        runtime.start_preheat()
+        blockupdate_scheduler = BlockUpdateScheduler()
+        blockupdate_scheduler.start()
         try:
+            runtime.start_preheat()
             yield
         finally:
+            await asyncio.to_thread(blockupdate_scheduler.close)
             runtime.close()
 
     app = FastAPI(

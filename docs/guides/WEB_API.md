@@ -54,7 +54,7 @@ OpenAPI 文档。
 | GET | `/api/dde_rank?sort_by=592888&count=58` | DDE 主力资金排行（value 单位亿，响应字段 248） |
 | GET | `/api/stocks2` | 全市场代码表（带磁盘缓存，自然日有效，含 code/name/market） |
 | GET | `/api/market_snapshot` | 全市场快照 |
-| GET | `/api/boards?category=industry` | 系统板块列表（本地 oracle） |
+| GET | `/api/boards?category=industry` | 系统板块列表（本地 oracle；云缓存每天北京时间 08:00、18:00 检查更新并失效内存缓存） |
 | GET | `/api/board_categories` | 板块分类树（行业/概念/地域/同花顺一二级） |
 | GET | `/api/hot_boards` | 热点板块全量行情（pageid=12480，513 个板块含涨跌家数/主力） |
 | GET | `/api/board/{code}/constituents` | 板块成分股 |

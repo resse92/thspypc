@@ -24,6 +24,8 @@ import socket
 import threading
 import time
 import datetime as dt
+import weakref
+from functools import wraps
 from collections.abc import Callable
 from pathlib import Path
 
@@ -130,7 +132,9 @@ def default_hexin_dir() -> str | None:
 _BLOCKUPDATE_CACHE_DIR = os.path.join(
     os.path.expanduser("~"), ".thspypc", "blockupdate"
 )
-_BLOCKUPDATE_LOCK = threading.Lock()
+_BLOCKUPDATE_LOCK = threading.RLock()
+_BLOCKUPDATE_SERVICES = weakref.WeakSet()
+_BEIJING_TZ = dt.timezone(dt.timedelta(hours=8))
 _BLOCKUPDATE_REFRESH_RUNNING = False
 _BLOCK_FILE_RE = re.compile(r"^block_[0-9A-F]+\.ini$", re.IGNORECASE)
 
@@ -265,17 +269,79 @@ def _refresh_cloud_blockupdate_cache(block_update_dir: str) -> bool:
     """按本地版本请求云 ZIP；无更新返回 True，失败时保留旧缓存。"""
     from ..features import blockupdate_cloud as cloud
 
-    version = _local_blockupdate_version(block_update_dir)
-    try:
-        zip_bytes = cloud.fetch_block_zip(version, timeout=15)
-        _install_cloud_block_zip(zip_bytes, block_update_dir)
-    except cloud.BlockCloudUpToDate:
-        logger.info("系统板块缓存已是最新（version=%s）", version)
-    except Exception as exc:
-        logger.warning("系统板块云更新失败，继续使用本地缓存：%s", exc)
-        return False
-    _mark_blockupdate_checked(block_update_dir)
+    with _BLOCKUPDATE_LOCK:
+        version = _local_blockupdate_version(block_update_dir)
+        try:
+            zip_bytes = cloud.fetch_block_zip(version, timeout=15)
+            _install_cloud_block_zip(zip_bytes, block_update_dir)
+        except cloud.BlockCloudUpToDate:
+            logger.info("系统板块缓存已是最新（version=%s）", version)
+        except Exception as exc:
+            logger.warning("系统板块云更新失败，继续使用本地缓存：%s", exc)
+            return False
+        _mark_blockupdate_checked(block_update_dir)
+        for service in list(_BLOCKUPDATE_SERVICES):
+            if service.block_update_dir == block_update_dir:
+                service._invalidate_cache()
     return True
+
+
+def _next_blockupdate_time(now: dt.datetime) -> dt.datetime:
+    """下一次北京时间 08:00 / 18:00，与服务器本地时区无关。"""
+    now = now.astimezone(_BEIJING_TZ)
+    for hour in (8, 18):
+        candidate = now.replace(hour=hour, minute=0, second=0, microsecond=0)
+        if candidate > now:
+            return candidate
+    return (now + dt.timedelta(days=1)).replace(
+        hour=8, minute=0, second=0, microsecond=0,
+    )
+
+
+def _scheduled_blockupdate_refresh() -> None:
+    cache_dir = os.environ.get("THS_BLOCKUPDATE_CACHE_DIR", _BLOCKUPDATE_CACHE_DIR)
+    # 定时检查不受“当天已检查”标记限制；不会覆盖用户的本地同花顺目录。
+    _refresh_cloud_blockupdate_cache(cache_dir)
+    with _BLOCKUPDATE_LOCK:
+        for service in list(_BLOCKUPDATE_SERVICES):
+            if service.block_update_dir != cache_dir:
+                service._invalidate_cache()
+
+
+class BlockUpdateScheduler:
+    """Web 服务生命周期内的板块缓存定时更新，不需要行情登录。"""
+
+    def __init__(self) -> None:
+        self._stop = threading.Event()
+        self._thread = threading.Thread(
+            target=self._run, name="ths-blockupdate-scheduler", daemon=True,
+        )
+
+    def start(self) -> None:
+        self._thread.start()
+
+    def close(self) -> None:
+        self._stop.set()
+        self._thread.join(timeout=20)
+
+    def _run(self) -> None:
+        while not self._stop.is_set():
+            now = dt.datetime.now(_BEIJING_TZ)
+            delay = (_next_blockupdate_time(now) - now).total_seconds()
+            if self._stop.wait(delay):
+                return
+            try:
+                _scheduled_blockupdate_refresh()
+            except Exception:
+                logger.exception("系统板块定时更新失败，继续使用旧缓存")
+
+
+def _blockupdate_locked(method):
+    @wraps(method)
+    def wrapped(*args, **kwargs):
+        with _BLOCKUPDATE_LOCK:
+            return method(*args, **kwargs)
+    return wrapped
 
 
 def _start_background_blockupdate_refresh(cache_dir: str) -> None:
@@ -365,6 +431,15 @@ class SystemBlocksService:
         self._categories: list[dict] | None = None
         if not Path(block_update_dir).is_dir():
             raise SystemBlocksError(f"BlockUpdate 目录不存在: {block_update_dir}")
+        with _BLOCKUPDATE_LOCK:
+            _BLOCKUPDATE_SERVICES.add(self)
+
+    def _invalidate_cache(self) -> None:
+        self._industry = None
+        self._tree = None
+        self._parents = None
+        self._files.clear()
+        self._categories = None
 
     @property
     def hexin_dir(self) -> str | None:
@@ -430,6 +505,7 @@ class SystemBlocksService:
 
     # ── 分类发现 ──
 
+    @_blockupdate_locked
     def categories(self) -> list[dict]:
         """返回板块分类列表（含行业），按树根顺序 + industry 优先。"""
         if self._categories is not None:
@@ -490,6 +566,7 @@ class SystemBlocksService:
 
     # ── 板块列表 ──
 
+    @_blockupdate_locked
     def boards(self, category: str | None = None) -> list[SystemBlock]:
         """列出系统板块。
 
@@ -563,6 +640,7 @@ class SystemBlocksService:
 
     # ── 成分股 ──
 
+    @_blockupdate_locked
     def constituents(self, block_id: str) -> list[BlockStock]:
         """返回板块成分股（只读，市场码按 hexin 数字码）。
 
@@ -595,6 +673,7 @@ class SystemBlocksService:
                 return list(constituents.get(block_id, ()))
         raise SystemBlocksError(f"板块不存在: {block_id}")
 
+    @_blockupdate_locked
     def stock_boards(self, code: str) -> list[SystemBlock]:
         """反向查询：某只股票所属的全部系统板块（行业 + 概念等）。"""
         code = code.strip()

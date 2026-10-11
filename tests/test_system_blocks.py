@@ -9,6 +9,7 @@ from __future__ import annotations
 
 import os
 import sys
+import datetime as dt
 from pathlib import Path
 
 import pytest
@@ -231,6 +232,83 @@ def test_service_constituents_and_lookup(tmp_path):
 def test_service_missing_install_raises():
     with pytest.raises(SystemBlocksError):
         SystemBlocksService(block_update_dir=r"C:\__no_such_ths_dir__")
+
+
+@pytest.mark.parametrize("hour,minute,expected_day,expected_hour", [
+    (7, 59, 1, 8), (8, 0, 1, 18), (17, 59, 1, 18),
+    (18, 0, 2, 8), (23, 59, 2, 8),
+])
+def test_blockupdate_schedule_beijing(hour, minute, expected_day, expected_hour):
+    from thspypc.services.system_blocks import _next_blockupdate_time
+
+    tz = dt.timezone(dt.timedelta(hours=8))
+    now = dt.datetime(2026, 10, 1, hour, minute, tzinfo=tz)
+    # 输入 UTC 时间也必须按北京时间计算。
+    assert _next_blockupdate_time(now.astimezone(dt.timezone.utc)) == dt.datetime(
+        2026, 10, expected_day, expected_hour, tzinfo=tz,
+    )
+
+
+def test_cloud_refresh_invalidates_memory_cache(tmp_path, monkeypatch):
+    from thspypc.services import system_blocks as module
+    from thspypc.features import blockupdate_cloud as cloud
+
+    service = _write_service_fixture(tmp_path)
+    service.boards("concept")
+    service.categories()
+    block_dir = service.block_update_dir
+    monkeypatch.setattr(cloud, "fetch_block_zip", lambda *args, **kwargs: b"zip")
+
+    def install(data, directory):
+        (Path(directory) / "block_2B.ini").write_text(
+            CONCEPT_SAMPLE.replace("BC电池", "新概念"), encoding="gbk",
+        )
+
+    monkeypatch.setattr(module, "_install_cloud_block_zip", install)
+    monkeypatch.setattr(module, "_mark_blockupdate_checked", lambda directory: None)
+    assert module._refresh_cloud_blockupdate_cache(block_dir)
+    assert service._categories is None
+    assert service.board("C024").name == "新概念"
+
+
+def test_cloud_refresh_failure_preserves_memory_cache(tmp_path, monkeypatch):
+    from thspypc.services import system_blocks as module
+    from thspypc.features import blockupdate_cloud as cloud
+
+    service = _write_service_fixture(tmp_path)
+    service.boards("concept")
+    cached = service._files["2B"]
+
+    def fail(*args, **kwargs):
+        raise OSError("offline")
+
+    monkeypatch.setattr(cloud, "fetch_block_zip", fail)
+    assert not module._refresh_cloud_blockupdate_cache(service.block_update_dir)
+    assert service._files["2B"] is cached
+
+
+def test_scheduled_refresh_ignores_daily_marker(tmp_path, monkeypatch):
+    from thspypc.services import system_blocks as module
+
+    calls = []
+    monkeypatch.setenv("THS_BLOCKUPDATE_CACHE_DIR", str(tmp_path))
+    monkeypatch.setattr(module, "_blockupdate_checked_today", lambda directory: True)
+    monkeypatch.setattr(module, "_refresh_cloud_blockupdate_cache", calls.append)
+    module._scheduled_blockupdate_refresh()
+    module._scheduled_blockupdate_refresh()
+    assert calls == [str(tmp_path), str(tmp_path)]
+
+
+def test_blockupdate_scheduler_stops_without_refresh(monkeypatch):
+    from thspypc.services import system_blocks as module
+
+    calls = []
+    monkeypatch.setattr(module, "_scheduled_blockupdate_refresh", lambda: calls.append(1))
+    scheduler = module.BlockUpdateScheduler()
+    scheduler.start()
+    scheduler.close()
+    assert not scheduler._thread.is_alive()
+    assert not calls
 
 
 # ── 真实 hexin 安装冒烟（本机验收口径，缺装则跳过）──
