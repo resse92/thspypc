@@ -1046,7 +1046,10 @@ def create_app(runtime: ThsRuntime | None = None) -> FastAPI:
         if len(code) != 6 or not code.isascii() or not code.isdigit():
             raise HTTPException(400, "股票代码必须是 6 位数字，如 000001")
         result = _call(lambda client: client.stock_concepts(code))
-        return [_to_dict(item) for item in result]
+        return [
+            {key: item[key] for key in ("block_id", "name", "parent_id")}
+            for item in map(_to_dict, result)
+        ]
 
     @app.get("/api/boards")
     def boards(category: str | None = None) -> list[dict]:

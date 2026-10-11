@@ -328,8 +328,7 @@ def test_stock_concepts_api(client_and_app):
     response = client.get("/api/stock/688981/concepts")
     assert response.status_code == 200
     assert response.json() == [{
-        "block_id": "C024", "name": "BC电池", "category": "concept",
-        "category_name": "概念", "source": "block_2B.ini", "parent_id": None,
+        "block_id": "C024", "name": "BC电池", "parent_id": None,
     }]
     assert ("stock_concepts", "688981") in fake.calls
     assert client.get("/api/stock/000001/concepts").json() == []
